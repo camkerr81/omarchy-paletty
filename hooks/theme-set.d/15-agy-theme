@@ -1,0 +1,94 @@
+#!/bin/bash
+# Omarchy Hook: Retint and synchronize Antigravity CLI (agy) theme
+
+python3 - <<'EOF'
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+def main():
+    colors_toml = Path.home() / ".local/state/omarchy/current/theme/colors.toml"
+    if not colors_toml.exists():
+        return
+
+    theme_data = {}
+    with open(colors_toml, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if "=" in line and not line.startswith("#"):
+                k, v = line.split("=", 1)
+                theme_data[k.strip()] = v.strip().strip('"').strip("'")
+
+    mode = theme_data.get("mode", "dark").lower()
+    bg = theme_data.get("background", "#0c0d0e")
+    fg = theme_data.get("foreground", "#eceff4")
+    accent = theme_data.get("accent", "#349bf0")
+
+    # 1. Update ~/.gemini/antigravity-cli/settings.json
+    settings_path = Path.home() / ".gemini/antigravity-cli/settings.json"
+    if settings_path.exists():
+        try:
+            with open(settings_path, "r", encoding="utf-8") as f:
+                settings = json.load(f)
+            settings["colorScheme"] = "light" if mode == "light" else "dark"
+            with open(settings_path, "w", encoding="utf-8") as f:
+                json.dump(settings, f, indent=2)
+        except Exception:
+            pass
+
+    # 2. Update ~/.gemini/antigravity-cli/jetski_state.pbtxt
+    pbtxt_path = Path.home() / ".gemini/antigravity-cli/jetski_state.pbtxt"
+    if pbtxt_path.exists():
+        try:
+            content = pbtxt_path.read_text(encoding="utf-8")
+            content = re.sub(r'theme_mode:\s*\w+\n?', '', content)
+            content = re.sub(r'custom_theme_seeds_(dark|light)\s*:\s*\{[^}]*\}\n?', '', content)
+            proto_mode = "THEME_MODE_LIGHT" if mode == "light" else "THEME_MODE_DARK"
+            seeds_key = "custom_theme_seeds_light" if mode == "light" else "custom_theme_seeds_dark"
+            snippet = f'\ntheme_mode: {proto_mode}\n{seeds_key}: {{\n  background: "{bg}"\n  primary: "{accent}"\n  foreground_override: "{fg}"\n}}\n'
+            content = content.rstrip() + snippet
+            pbtxt_path.write_text(content, encoding="utf-8")
+        except Exception:
+            pass
+
+    # 3. Live retint all running agy terminal instances via OSC escape codes
+    try:
+        res = subprocess.run(["omarchy-theme-osc", str(colors_toml)], capture_output=True)
+        osc_data = res.stdout
+    except Exception:
+        osc_data = None
+
+    if osc_data:
+        pids = set()
+        for proc in Path("/proc").glob("[0-9]*"):
+            try:
+                comm_file = proc / "comm"
+                if comm_file.exists() and comm_file.read_text().strip() in ("agy", "antigravity"):
+                    pids.add(int(proc.name))
+            except Exception:
+                pass
+
+        seen_ttys = set()
+        for pid in pids:
+            fd_dir = Path(f"/proc/{pid}/fd")
+            if not fd_dir.exists():
+                continue
+            try:
+                for fd in fd_dir.iterdir():
+                    try:
+                        target = os.readlink(fd)
+                        if target.startswith("/dev/pts/") and target not in seen_ttys:
+                            seen_ttys.add(target)
+                            with open(target, "wb") as f:
+                                f.write(osc_data)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+if __name__ == "__main__":
+    main()
+EOF

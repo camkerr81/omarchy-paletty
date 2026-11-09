@@ -1,0 +1,573 @@
+#!/usr/bin/env python3
+"""
+omarchy-paletty-roll: Roll a random paletty.dev color palette and match it with
+a wallpaper from wallpaper-api (CIEDE2000 perceptual color matching), then apply
+it as an Omarchy theme.
+
+Also provides wallpaper cycling across matched wallpapers from wallpaper-api/Wallhaven.
+"""
+
+import argparse
+import colorsys
+import json
+import os
+import random
+import re
+import shutil
+import subprocess
+import sys
+import urllib.parse
+import urllib.request
+
+USER_THEMES_DIR = os.path.expanduser("~/.config/omarchy/themes")
+DEFAULT_THEME_SLUG = "paletty-roll"
+CATALOG_PATH = "/home/camkerr81/Work/omarchy-launcher/app/src/main/assets/paletty_catalog.json"
+WALLPAPER_API_HOSTS = ["http://192.168.8.194:8001", "http://localhost:8001"]
+
+# Predefined Wallhaven 6-digit hex palette colors for direct fallback
+WALLHAVEN_PRESET_COLORS = [
+    "660000", "990000", "cc0000", "cc3333", "ea4c88", "993399",
+    "663399", "333399", "0066cc", "0099ff", "66cccc", "77cc33",
+    "669900", "336600", "666600", "999900", "cccc33", "ffff00",
+    "ff9900", "ff6600", "cc6633", "996633", "663300", "000000",
+    "999999", "cccccc", "ffffff", "424153"
+]
+
+# Fallback Paletty theme if network and catalog are unavailable
+PALETTY_FALLBACK = {
+    "id": "paletty_midnight",
+    "name": "Midnight Paletty",
+    "slug": "midnight",
+    "is_dark": True,
+    "author": {"username": "spacetime-labs"},
+    "colors": {
+        "core.background": "#08111B",
+        "core.foreground": "#FFFFFF",
+        "core.cursor": "#00FF92",
+        "core.selectionBackground": "#1B324C",
+        "ansi.normal.0": "#08111B",
+        "ansi.normal.1": "#E87878",
+        "ansi.normal.2": "#00FF92",
+        "ansi.normal.3": "#FEFC7F",
+        "ansi.normal.4": "#2E9CFB",
+        "ansi.normal.5": "#C088E0",
+        "ansi.normal.6": "#00EEFF",
+        "ansi.normal.7": "#D0D7DE",
+        "ansi.bright.0": "#1B324C",
+        "ansi.bright.1": "#E87878",
+        "ansi.bright.2": "#00FF92",
+        "ansi.bright.3": "#FEFC7F",
+        "ansi.bright.4": "#2E9CFB",
+        "ansi.bright.5": "#C088E0",
+        "ansi.bright.6": "#00EEFF",
+        "ansi.bright.7": "#FFFFFF"
+    }
+}
+
+def hex_to_rgb(hex_str, default=(0, 0, 0)):
+    if not hex_str:
+        return default
+    clean = hex_str.strip().lstrip("#")
+    if len(clean) == 3:
+        clean = "".join(c * 2 for c in clean)
+    if len(clean) != 6:
+        return default
+    try:
+        return tuple(int(clean[i:i+2], 16) for i in (0, 2, 4))
+    except ValueError:
+        return default
+
+def rgb_to_hex(r, g, b):
+    r = max(0, min(255, int(round(r))))
+    g = max(0, min(255, int(round(g))))
+    b = max(0, min(255, int(round(b))))
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+def closest_wallhaven_color(hex_str):
+    r1, g1, b1 = hex_to_rgb(hex_str)
+    best = "000000"
+    min_dist = float("inf")
+    for wh in WALLHAVEN_PRESET_COLORS:
+        r2, g2, b2 = hex_to_rgb(wh)
+        d = (r1 - r2)**2 + (g1 - g2)**2 + (b1 - b2)**2
+        if d < min_dist:
+            min_dist = d
+            best = wh
+    return best
+
+def adjust_brightness(hex_str, factor):
+    r, g, b = hex_to_rgb(hex_str)
+    return rgb_to_hex(r * factor, g * factor, b * factor)
+
+def blend_colors(hex1, hex2, ratio=0.5):
+    r1, g1, b1 = hex_to_rgb(hex1)
+    r2, g2, b2 = hex_to_rgb(hex2)
+    return rgb_to_hex(r1 * (1 - ratio) + r2 * ratio,
+                      g1 * (1 - ratio) + g2 * ratio,
+                      b1 * (1 - ratio) + b2 * ratio)
+
+def pick_yaru_icon_theme(accent_hex, is_dark=True):
+    r, g, b = hex_to_rgb(accent_hex)
+    h, s, v = colorsys.rgb_to_hsv(r / 255.0, g / 255.0, b / 255.0)
+    hue_deg = h * 360.0
+    suffix = "-dark" if is_dark else ""
+
+    if s < 0.15:
+        return f"Yaru{suffix}"
+    elif hue_deg < 25 or hue_deg >= 340:
+        return f"Yaru-red{suffix}"
+    elif 25 <= hue_deg < 50:
+        return f"Yaru-yellow{suffix}"
+    elif 50 <= hue_deg < 80:
+        return f"Yaru-olive{suffix}"
+    elif 80 <= hue_deg < 165:
+        return f"Yaru-prussiangreen{suffix}"
+    elif 165 <= hue_deg < 255:
+        return f"Yaru-blue{suffix}"
+    elif 255 <= hue_deg < 290:
+        return f"Yaru-purple{suffix}"
+    else:
+        return f"Yaru-magenta{suffix}"
+
+def fetch_random_palette():
+    # 1. Attempt online fetch from paletty.dev
+    try:
+        offset = random.randint(0, 15) * 20
+        url = f"https://paletty.dev/api/palettes?offset={offset}&limit=20"
+        req = urllib.request.Request(url, headers={"User-Agent": "OmarchyLauncher/1.4 (Desktop)"})
+        with urllib.request.urlopen(req, timeout=3.5) as resp:
+            if resp.status == 200:
+                body = resp.read().decode("utf-8", errors="replace")
+                data = json.loads(body)
+                palettes = data.get("palettes", [])
+                if palettes:
+                    return random.choice(palettes)
+    except Exception as e:
+        print(f"[paletty-roll] Online fetch failed ({e}), falling back to catalog...", file=sys.stderr)
+
+    # 2. Offline fallback from bundled catalog in omarchy-launcher
+    if os.path.exists(CATALOG_PATH):
+        try:
+            with open(CATALOG_PATH, "r", encoding="utf-8") as f:
+                catalog = json.load(f)
+                if catalog:
+                    return random.choice(catalog)
+        except Exception as e:
+            print(f"[paletty-roll] Catalog fallback error: {e}", file=sys.stderr)
+
+    # 3. Ultimate fallback
+    return PALETTY_FALLBACK
+
+def query_wallpaper_api(colors, tolerance=38.0, distance_metric="ciede2000", category=None, limit=24):
+    encoded_colors = urllib.parse.quote(",".join(colors))
+    query_params = {
+        "colors": ",".join(colors),
+        "tolerance": str(tolerance),
+        "distance_metric": distance_metric,
+        "limit": str(limit),
+        "purity": "sfw"
+    }
+    if category and category.lower() != "all":
+        query_params["category"] = category.lower()
+
+    qs = urllib.parse.urlencode(query_params)
+    for host in WALLPAPER_API_HOSTS:
+        try:
+            url = f"{host}/api/v1/search?{qs}"
+            req = urllib.request.Request(url, headers={"User-Agent": "OmarchyThemeChooser/1.0"})
+            with urllib.request.urlopen(req, timeout=2.5) as resp:
+                if resp.status == 200:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    results = data.get("results", [])
+                    if results:
+                        return results
+        except Exception:
+            continue
+    return []
+
+def query_wallhaven_public(hex_color, category=None, limit=24):
+    wh_color = closest_wallhaven_color(hex_color)
+    query_params = {
+        "colors": wh_color,
+        "purity": "100", # sfw
+        "sorting": "random"
+    }
+    if category and category.lower() in ("general", "anime", "people"):
+        # Wallhaven uses 100 for general, 010 for anime, 001 for people
+        cat_map = {"general": "100", "anime": "010", "people": "001"}
+        query_params["categories"] = cat_map.get(category.lower(), "110")
+    else:
+        query_params["categories"] = "110" # general + anime
+
+    qs = urllib.parse.urlencode(query_params)
+    url = f"https://wallhaven.cc/api/v1/search?{qs}"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "OmarchyThemeChooser/1.0"})
+        with urllib.request.urlopen(req, timeout=4.0) as resp:
+            if resp.status == 200:
+                data = json.loads(resp.read().decode("utf-8"))
+                items = data.get("data", [])
+                results = []
+                for it in items[:limit]:
+                    results.append({
+                        "id": it.get("id"),
+                        "path": it.get("path"),
+                        "thumbs": it.get("thumbs", {}),
+                        "resolution": it.get("resolution", ""),
+                        "category": it.get("category", "general"),
+                        "purity": it.get("purity", "sfw"),
+                        "distance_score": None,
+                        "colors": it.get("colors", [])
+                    })
+                return results
+    except Exception as e:
+        print(f"[paletty-roll] Wallhaven public fallback error: {e}", file=sys.stderr)
+    return []
+
+def search_best_wallpaper(bg, primary, secondary, tertiary, category=None):
+    query_colors = [bg, primary, secondary, tertiary]
+    # Attempt 1: Strict tolerance CIEDE2000 with 4 colors on wallpaper-api
+    results = query_wallpaper_api(query_colors, tolerance=38.0, distance_metric="ciede2000", category=category)
+    if results:
+        return results
+
+    # Attempt 2: Relaxed tolerance
+    results = query_wallpaper_api(query_colors, tolerance=48.0, distance_metric="ciede2000", category=category)
+    if results:
+        return results
+
+    # Attempt 3: Background + Primary with 55.0 tolerance
+    results = query_wallpaper_api([bg, primary], tolerance=55.0, distance_metric="ciede2000", category=category)
+    if results:
+        return results
+
+    # Attempt 4: Fallback to Wallhaven public API with primary accent / background
+    print("[paletty-roll] Falling back to Wallhaven public color search...", file=sys.stderr)
+    wh_results = query_wallhaven_public(primary, category=category)
+    if not wh_results:
+        wh_results = query_wallhaven_public(bg, category=category)
+    return wh_results
+
+def download_file(url, target_path):
+    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+    req = urllib.request.Request(url, headers={"User-Agent": "OmarchyThemeChooser/1.0"})
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        with open(target_path, "wb") as f:
+            shutil.copyfileobj(resp, f)
+
+def generate_theme(palette, theme_slug=DEFAULT_THEME_SLUG, category=None):
+    colors = palette.get("colors", {})
+    name = palette.get("name", "Paletty Theme")
+    author_obj = palette.get("author") or {}
+    author_name = author_obj.get("username", "Paletty.dev")
+    is_dark = palette.get("is_dark", True)
+    mode = "dark" if is_dark else "light"
+
+    # Core Colors
+    bg = colors.get("core.background", "#0c0d0e" if is_dark else "#f5f5f5")
+    fg = colors.get("core.foreground", "#eceff4" if is_dark else "#111111")
+    cursor = colors.get("core.cursor", "#00ff92")
+    selection = colors.get("core.selectionBackground", "#1b324c" if is_dark else "#c0d5f0")
+
+    # ANSI Normal
+    normal0 = colors.get("ansi.normal.0", "#141618" if is_dark else "#e5e5e5")
+    normal1 = colors.get("ansi.normal.1", "#ff5555")
+    normal2 = colors.get("ansi.normal.2", "#33ff33")
+    normal3 = colors.get("ansi.normal.3", "#ffb000")
+    normal4 = colors.get("ansi.normal.4", "#349bf0")
+    normal5 = colors.get("ansi.normal.5", "#ff2a85")
+    normal6 = colors.get("ansi.normal.6", "#00e5ff")
+    normal7 = colors.get("ansi.normal.7", "#8892b0" if is_dark else "#666666")
+
+    # ANSI Bright
+    bright0 = colors.get("ansi.bright.0", "#232b25" if is_dark else "#cccccc")
+    bright1 = colors.get("ansi.bright.1", normal1)
+    bright2 = colors.get("ansi.bright.2", normal2)
+    bright3 = colors.get("ansi.bright.3", normal3)
+    bright4 = colors.get("ansi.bright.4", normal4)
+    bright5 = colors.get("ansi.bright.5", normal5)
+    bright6 = colors.get("ansi.bright.6", normal6)
+    bright7 = colors.get("ansi.bright.7", fg)
+
+    # Primary accents
+    accent = colors.get("ansi.bright.4") or colors.get("ansi.bright.6") or normal4
+    secondary = colors.get("ansi.bright.6") or normal6
+    tertiary = colors.get("ansi.bright.5") or normal5
+
+    # Depth backgrounds
+    dark_bg = adjust_brightness(bg, 0.75 if is_dark else 1.05)
+    darker_bg = adjust_brightness(bg, 0.55 if is_dark else 1.12)
+    lighter_bg = adjust_brightness(bg, 1.35 if is_dark else 0.92)
+
+    # Foreground shades
+    dark_fg = normal7
+    light_fg = fg
+    bright_fg = bright7
+
+    # Orange & Brown
+    orange = blend_colors(normal1, normal3, 0.5)
+    brown = adjust_brightness(orange, 0.6)
+
+    # Hyprland borders
+    active_border_1 = accent.lstrip("#")
+    active_border_2 = secondary.lstrip("#")
+    inactive_border = selection.lstrip("#")
+
+    theme_dir = os.path.join(USER_THEMES_DIR, theme_slug)
+    backgrounds_dir = os.path.join(theme_dir, "backgrounds")
+    os.makedirs(backgrounds_dir, exist_ok=True)
+
+    # Search wallpaper
+    print(f"[paletty-roll] Querying wallpaper matches for palette '{name}'...", file=sys.stderr)
+    wallpapers = search_best_wallpaper(bg, accent, secondary, tertiary, category=category)
+    chosen_wp = None
+    wallpaper_filename = "wallpaper.jpg"
+
+    if wallpapers:
+        # Save full wallpaper list for Ctrl+W cycling
+        wallpapers_cache = {
+            "theme": theme_slug,
+            "palette": name,
+            "query_colors": [bg, accent, secondary, tertiary],
+            "active_index": 0,
+            "wallpapers": wallpapers
+        }
+        with open(os.path.join(theme_dir, "wallpapers.json"), "w", encoding="utf-8") as f:
+            json.dump(wallpapers_cache, f, indent=2)
+
+        chosen_wp = wallpapers[0]
+        wp_url = chosen_wp.get("path")
+        ext = os.path.splitext(wp_url)[1] or ".jpg"
+        wallpaper_filename = f"{chosen_wp.get('id', 'wallpaper')}{ext}"
+        target_wp_path = os.path.join(backgrounds_dir, wallpaper_filename)
+
+        print(f"[paletty-roll] Downloading initial matched wallpaper: {wp_url}...", file=sys.stderr)
+        try:
+            download_file(wp_url, target_wp_path)
+            # Create preview.jpg / preview.png
+            preview_path = os.path.join(theme_dir, "preview" + ext)
+            shutil.copy2(target_wp_path, preview_path)
+        except Exception as e:
+            print(f"[paletty-roll] Wallpaper download failed: {e}", file=sys.stderr)
+    else:
+        print("[paletty-roll] No wallpaper matches found; retaining existing background if present", file=sys.stderr)
+
+    # Build colors.toml
+    colors_toml_content = f"""# Paletty.dev Theme: {name} by {author_name}
+mode = "{mode}"
+
+accent = "{accent}"
+selection = "{selection}"
+muted = "{normal7}"
+
+background = "{bg}"
+dark_background = "{dark_bg}"
+darker_background = "{darker_bg}"
+lighter_background = "{lighter_bg}"
+
+foreground = "{fg}"
+dark_foreground = "{dark_fg}"
+light_foreground = "{light_fg}"
+bright_foreground = "{bright_fg}"
+
+hyprland_active_border = "rgba({active_border_1}ee) rgba({active_border_2}ee)"
+hyprland_inactive_border = "rgba({inactive_border}aa)"
+
+red = "{normal1}"
+yellow = "{normal3}"
+orange = "{orange}"
+green = "{normal2}"
+cyan = "{normal6}"
+blue = "{normal4}"
+magenta = "{normal5}"
+brown = "{brown}"
+
+bright_red = "{bright1}"
+bright_yellow = "{bright3}"
+bright_green = "{bright2}"
+bright_cyan = "{bright6}"
+bright_blue = "{bright4}"
+bright_magenta = "{bright5}"
+"""
+
+    colors_toml_path = os.path.join(theme_dir, "colors.toml")
+    with open(colors_toml_path, "w", encoding="utf-8") as f:
+        f.write(colors_toml_content)
+
+    # Write icons.theme
+    icon_theme = pick_yaru_icon_theme(accent, is_dark=is_dark)
+    icons_theme_path = os.path.join(theme_dir, "icons.theme")
+    with open(icons_theme_path, "w", encoding="utf-8") as f:
+        f.write(icon_theme + "\n")
+
+    return {
+        "name": name,
+        "author": author_name,
+        "slug": theme_slug,
+        "wallpaper": chosen_wp,
+        "accent": accent,
+        "mode": mode
+    }
+
+def cycle_wallpaper(theme_slug=None):
+    """Cycle to the next wallpaper in the theme's wallpaper-api results list."""
+    if not theme_slug:
+        theme_name_file = os.path.expanduser("~/.local/state/omarchy/current/theme.name")
+        if os.path.exists(theme_name_file):
+            with open(theme_name_file, "r", encoding="utf-8") as f:
+                theme_slug = f.read().strip()
+        if not theme_slug:
+            theme_slug = DEFAULT_THEME_SLUG
+
+    theme_dir = os.path.join(USER_THEMES_DIR, theme_slug)
+    wallpapers_path = os.path.join(theme_dir, "wallpapers.json")
+    wallpapers_data = None
+
+    if os.path.exists(wallpapers_path):
+        try:
+            with open(wallpapers_path, "r", encoding="utf-8") as f:
+                wallpapers_data = json.load(f)
+        except Exception as e:
+            print(f"[wallpaper-cycle] Error reading wallpapers.json: {e}", file=sys.stderr)
+
+    # If no wallpapers.json exists, attempt on-demand query from colors.toml
+    if not wallpapers_data or not wallpapers_data.get("wallpapers"):
+        colors_toml = os.path.join(theme_dir, "colors.toml")
+        bg, accent, cyan, magenta = "#0c0d0e", "#349bf0", "#00e5ff", "#ff2a85"
+        if os.path.exists(colors_toml):
+            with open(colors_toml, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("background ="):
+                        bg = line.split("=")[1].strip().strip('"\'')
+                    elif line.startswith("accent ="):
+                        accent = line.split("=")[1].strip().strip('"\'')
+                    elif line.startswith("cyan ="):
+                        cyan = line.split("=")[1].strip().strip('"\'')
+                    elif line.startswith("magenta ="):
+                        magenta = line.split("=")[1].strip().strip('"\'')
+        print(f"[wallpaper-cycle] Fetching wallpaper matches for '{theme_slug}'...", file=sys.stderr)
+        wps = search_best_wallpaper(bg, accent, cyan, magenta)
+        if wps:
+            wallpapers_data = {
+                "theme": theme_slug,
+                "palette": theme_slug,
+                "active_index": 0,
+                "wallpapers": wps
+            }
+            with open(wallpapers_path, "w", encoding="utf-8") as f:
+                json.dump(wallpapers_data, f, indent=2)
+
+    if not wallpapers_data or not wallpapers_data.get("wallpapers"):
+        print("[wallpaper-cycle] No wallpapers found to cycle.", file=sys.stderr)
+        subprocess.run(["omarchy-notification-send", "-g", "󰸌", "⢞⡷ Wallpaper Cycler", "No matched wallpapers available for this theme"])
+        return 1
+
+    wallpapers = wallpapers_data["wallpapers"]
+    total = len(wallpapers)
+    active_index = wallpapers_data.get("active_index", 0)
+    next_index = (active_index + 1) % total
+
+    chosen_wp = wallpapers[next_index]
+    wp_id = chosen_wp.get("id", f"wallpaper_{next_index}")
+    wp_url = chosen_wp.get("path")
+    ext = os.path.splitext(wp_url)[1] if wp_url else ".jpg"
+    if not ext:
+        ext = ".jpg"
+
+    backgrounds_dir = os.path.join(theme_dir, "backgrounds")
+    os.makedirs(backgrounds_dir, exist_ok=True)
+    target_wp_path = os.path.join(backgrounds_dir, f"{wp_id}{ext}")
+
+    if not os.path.exists(target_wp_path) and wp_url:
+        print(f"[wallpaper-cycle] Downloading wallpaper {next_index + 1}/{total} ({wp_id})...", file=sys.stderr)
+        try:
+            download_file(wp_url, target_wp_path)
+        except Exception as e:
+            print(f"[wallpaper-cycle] Failed to download {wp_url}: {e}", file=sys.stderr)
+            return 1
+
+    if os.path.exists(target_wp_path):
+        # Update preview in theme directory
+        preview_path = os.path.join(theme_dir, "preview" + ext)
+        try:
+            shutil.copy2(target_wp_path, preview_path)
+        except Exception:
+            pass
+
+        # Apply via omarchy-theme-bg-set
+        subprocess.run(["omarchy-theme-bg-set", target_wp_path], check=True)
+
+        # Update wallpapers.json state
+        wallpapers_data["active_index"] = next_index
+        with open(wallpapers_path, "w", encoding="utf-8") as f:
+            json.dump(wallpapers_data, f, indent=2)
+
+        # Notification
+        score_str = f" | ΔE {chosen_wp['distance_score']:.1f}" if chosen_wp.get("distance_score") is not None else ""
+        res_str = chosen_wp.get("resolution", "")
+        cat_str = chosen_wp.get("category", "general").capitalize()
+        notify_title = f"⢞⡷ Matched Wallpaper ({next_index + 1}/{total})"
+        notify_body = f"{cat_str} {res_str}{score_str} [ID: {wp_id}]"
+        subprocess.run(["omarchy-notification-send", "-g", "󰸌", notify_title, notify_body])
+        print(f"⢞⡷ Switched to wallpaper {next_index + 1}/{total}: {wp_id} ({res_str})")
+        return 0
+
+    return 1
+
+def main():
+    # If invoked directly via symlink 'omarchy-paletty-wallpaper-cycle'
+    prog_name = os.path.basename(sys.argv[0])
+    if prog_name in ("omarchy-paletty-wallpaper-cycle", "omarchy-theme-wallpaper-cycle"):
+        return cycle_wallpaper()
+
+    parser = argparse.ArgumentParser(description="Roll a random paletty.dev theme matched with wallpaper-api")
+    parser.add_argument("--prepare-next", action="store_true", help="Prepare next roll without immediately applying")
+    parser.add_argument("--save", action="store_true", help="Also archive this theme under its own unique slug")
+    parser.add_argument("--category", type=str, default=None, help="Wallpaper category filter (general, anime, people)")
+    parser.add_argument("--name", type=str, default=DEFAULT_THEME_SLUG, help="Target theme name/slug")
+    parser.add_argument("--cycle", "--cycle-wallpaper", action="store_true", dest="cycle", help="Cycle to next wallpaper in current matched list")
+    args = parser.parse_args()
+
+    if args.cycle:
+        target_slug = args.name if args.name != DEFAULT_THEME_SLUG else None
+        return cycle_wallpaper(target_slug)
+
+    palette = fetch_random_palette()
+    target_slug = args.name
+    res = generate_theme(palette, theme_slug=target_slug, category=args.category)
+
+    if args.save:
+        # Also copy to paletty-<slug>
+        clean_slug = re.sub(r"[^a-z0-9]+", "-", palette.get("slug", palette.get("name", "custom")).lower()).strip("-")
+        archive_slug = f"paletty-{clean_slug}"
+        archive_dir = os.path.join(USER_THEMES_DIR, archive_slug)
+        src_dir = os.path.join(USER_THEMES_DIR, target_slug)
+        shutil.copytree(src_dir, archive_dir, dirs_exist_ok=True)
+        print(f"[paletty-roll] Archived theme copy to '{archive_slug}'", file=sys.stderr)
+
+    # If --prepare-next was passed, exit here (do not apply)
+    if args.prepare_next:
+        print(f"[paletty-roll] Pre-staged next Paletty roll: '{res['name']}'", file=sys.stderr)
+        return 0
+
+    # Otherwise apply immediately
+    print(f"[paletty-roll] Applying theme '{target_slug}'...", file=sys.stderr)
+    subprocess.run(["omarchy-theme-set", target_slug], check=True)
+
+    # Notify
+    wp_info = ""
+    if res.get("wallpaper"):
+        wp = res["wallpaper"]
+        score = f"ΔE {wp['distance_score']:.1f}" if wp.get("distance_score") is not None else ""
+        res_str = wp.get("resolution", "")
+        wp_info = f"\nWallpaper: {wp.get('category', 'general').capitalize()} {res_str} [{score}]".strip()
+
+    notify_title = f"⢞⡷ Rolled Paletty: {res['name']}"
+    notify_body = f"By {res['author']} ({res['mode']} mode){wp_info}"
+    subprocess.run(["omarchy-notification-send", "-g", "󰸌", notify_title, notify_body])
+
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())

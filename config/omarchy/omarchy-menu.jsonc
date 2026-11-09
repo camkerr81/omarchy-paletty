@@ -1,0 +1,19 @@
+// Omarchy Menu extension snippet for omarchy-paletty
+// Add these entries to ~/.config/omarchy/extensions/omarchy-menu.jsonc
+
+{
+  "appearance.roll_paletty": {
+    "icon": "󰸌",
+    "label": "Roll Paletty Theme",
+    "aliases": ["roll", "paletty", "random-theme"],
+    "description": "Roll random paletty.dev palette & match wallpaper",
+    "action": "omarchy-paletty-roll"
+  },
+  "appearance.cycle_paletty_wallpaper": {
+    "icon": "󰸌",
+    "label": "Cycle Matched Wallpaper",
+    "aliases": ["next-wallpaper", "cycle-wallpaper"],
+    "description": "Cycle through wallpaper-api matches (Ctrl+W in chooser)",
+    "action": "omarchy-paletty-wallpaper-cycle"
+  }
+}
