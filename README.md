@@ -8,7 +8,7 @@
 
 **omarchy-paletty** brings random, mathematically harmonious theming to Omarchy Linux desktop and the Antigravity CLI (`agy`). Just like the Android `omarchy-launcher`, it rolls a random palette from `paletty.dev`, matches high-resolution wallpapers using perceptual color space distances (CIEDE2000 in CIELAB), applies full system colors across Hyprland, Foot, Alacritty, Kitty, Ghostty, Neovim, and VS Code, and synchronizes the active `agy` AI interface live without restarting.
 
-It also integrates seamlessly into the Omarchy Image Picker (`camkerr81.image-picker`), enabling users to roll themes on demand with `Ctrl+R` and cycle through matched wallpapers with `Ctrl+W`.
+It also integrates seamlessly into the Omarchy Image Picker (`paletty.image-picker`), enabling users to roll themes on demand with `Ctrl+R` and cycle through matched wallpapers with `Ctrl+W`.
 
 ---
 
@@ -19,7 +19,7 @@ It also integrates seamlessly into the Omarchy Image Picker (`camkerr81.image-pi
 - **⠶ Live Antigravity CLI Retinting**: Custom theme hook dynamically discovers running `agy` processes via Linux `/proc/<pid>/fd` PTY enumeration and broadcasts OSC color escape sequences without restarting the process.
 - **⠶ Wallpaper Cycler (`Ctrl+W`)**: Caches all candidate wallpapers in `wallpapers.json` and allows instant cycling with desktop notifications and resolution/$\Delta E$ readouts.
 - **⠶ Zero-Latency Theme Switcher Integration**: Pre-stages the next theme in the background via `theme-set.d` hooks so rolls appear instantaneous.
-- **⠶ Quickshell Modal Shortcuts**: Custom `camkerr81.image-picker` Quickshell plugin with tactile Braille iconography and direct keyboard shortcuts.
+- **⠶ Quickshell Modal Shortcuts**: Custom `paletty.image-picker` Quickshell plugin with tactile Braille iconography and direct keyboard shortcuts.
 
 ---
 
@@ -77,7 +77,7 @@ flowchart TD
 Clone and run the idempotent installer:
 
 ```bash
-git clone http://192.168.8.177:3000/camkerr81/omarchy-paletty.git
+git clone https://github.com/camkerr81/omarchy-paletty.git
 cd omarchy-paletty
 ./install.sh
 ```
@@ -85,7 +85,7 @@ cd omarchy-paletty
 The installer:
 1. Installs `omarchy-paletty-roll` and convenience symlinks to `~/.local/bin/`.
 2. Installs automation hooks to `~/.config/omarchy/hooks/theme-set.d/`.
-3. Installs the `camkerr81.image-picker` Quickshell plugin to `~/.config/omarchy/plugins/`.
+3. Installs the `paletty.image-picker` Quickshell plugin to `~/.config/omarchy/plugins/`.
 4. Appends `SUPER + ALT + W` keybinding to `~/.config/hypr/bindings.lua` and reloads Hyprland.
 5. Pre-stages the initial theme candidate in the background.
 
@@ -102,6 +102,9 @@ omarchy-paletty-wallpaper-cycle
 # or:
 omarchy-paletty-roll --cycle
 
+# Override target Wallpaper API endpoint:
+WALLPAPER_API_URL="https://wallpapers.yourdomain.com" omarchy-paletty-roll
+
 # Filter wallpapers by category (general, anime, people):
 omarchy-paletty-roll --category anime
 
@@ -111,6 +114,119 @@ omarchy-paletty-roll --save
 # Pre-stage next roll in background without immediately applying:
 omarchy-paletty-roll --prepare-next
 ```
+
+---
+
+## ⣠⣇ Installing & Running the `wallpaper-api` Docker Stack
+
+The wallpaper matching engine connects to **wallpaper-api**, a standalone FastAPI + PostgreSQL (with CIELAB `cube` vector matching) + Redis + Celery crawler engine.
+
+### 1. Prerequisites
+- Docker Engine 24+ & Docker Compose v2
+- Network access to `wallhaven.cc`
+
+### 2. Clone and Configure
+In your workspace or server:
+
+```bash
+git clone https://github.com/camkerr81/wallpaper-api.git
+cd wallpaper-api
+
+# Create environment configuration
+cp .env.example .env
+```
+
+Verify your `.env` settings:
+```env
+API_PORT=8001
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=postgres
+POSTGRES_DB=wallpapers
+POSTGRES_PORT=5432
+REDIS_URL="redis://redis:6379/0"
+WALLHAVEN_API_KEY=""  # Optional: raises rate limits
+```
+
+### 3. Start the Docker Stack
+```bash
+docker compose up -d --build
+```
+
+The stack launches 4 containers:
+1. **`wallpaper_db`**: PostgreSQL 16 + Alpine with `cube` extension initialized via `init-db.sql`.
+2. **`wallpaper_redis`**: Redis 7 Alpine caching and task queue broker.
+3. **`wallpaper_api`**: FastAPI application exposed on host port `8001`.
+4. **`wallpaper_worker`**: Celery worker executing background ingestion and CIELAB color vectorization.
+
+### 4. Verify Health
+```bash
+curl -s http://localhost:8001/health | jq .
+```
+Expected response:
+```json
+{
+  "status": "ok",
+  "app": "Wallhaven Palette Wallpaper API",
+  "version": "1.0.0",
+  "database": "healthy",
+  "redis": "healthy"
+}
+```
+
+### 5. Trigger Initial Wallhaven Ingestion
+Populate your database with wallpapers and their extracted dominant color palettes:
+```bash
+# Start background crawl of top wallpapers (e.g. 10 pages)
+curl -X POST "http://localhost:8001/api/v1/sync/start?pages=10&categories=110&purity=100"
+```
+
+Check ingestion progress:
+```bash
+curl -s http://localhost:8001/api/v1/stats | jq .
+```
+
+---
+
+## ⢾⢷ Deploying `wallpaper-api` on Cloudflare (Public API)
+
+To make `wallpaper-api` globally accessible over HTTPS without exposing home router ports or dealing with dynamic IP changes, use a **Cloudflare Tunnel**:
+
+### Architecture:
+```
+[ Client / Desktop ]
+        │ HTTPS (443)
+        ▼
+[ Cloudflare Edge: https://wallpapers.yourdomain.com ]
+        │ Encrypted Noise Tunnel (cloudflared)
+        ▼
+[ Host / Server: http://localhost:8001 ]
+        │
+   ┌────┴──────────────────────────┐
+   │ Docker: wallpaper-api stack   │
+   │ (FastAPI, Postgres, Redis)    │
+   └───────────────────────────────┘
+```
+
+### Setup Steps:
+1. **Using Cloudflare Tunnel (`cloudflared`)**:
+   Add a public hostname route to your Cloudflare tunnel configuration:
+   ```yaml
+   # ingress rule in /etc/cloudflared/config.yml or Cloudflare Zero Trust Dashboard:
+   - hostname: wallpapers.yourdomain.com
+     service: http://localhost:8001
+   ```
+2. **Zero Trust Dashboard Route**:
+   - Go to **Cloudflare Zero Trust** → **Networks** → **Tunnels**.
+   - Select your active tunnel.
+   - Add a Public Hostname:
+     - **Subdomain:** `wallpapers`
+     - **Domain:** `yourdomain.com`
+     - **Service:** `HTTP://localhost:8001` (or your internal server IP:port)
+3. **Public Endpoint Ready**:
+   - Once configured, your API is available worldwide at:
+     `https://wallpapers.yourdomain.com/api/v1/search`
+   - Point the desktop client to your tunnel via `WALLPAPER_API_URL`:
+     `export WALLPAPER_API_URL="https://wallpapers.yourdomain.com"`
 
 ---
 
@@ -128,7 +244,7 @@ omarchy-paletty/
 │       ├── 15-agy-theme                  # Live agy terminal PTY/OSC retinter
 │       └── 20-paletty-roll               # Pre-stages next roll on theme activation
 ├── plugins/
-│   └── camkerr81.image-picker/           # Quickshell overlay with Ctrl+R & Ctrl+W
+│   └── paletty.image-picker/             # Quickshell overlay with Ctrl+R & Ctrl+W
 ├── config/
 │   ├── hypr/
 │   │   └── bindings.lua                  # Hyprland keybinding snippet

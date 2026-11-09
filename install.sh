@@ -5,7 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_DIR="${HOME}/.local/bin"
 HOOKS_DIR="${HOME}/.config/omarchy/hooks/theme-set.d"
-PLUGINS_DIR="${HOME}/.config/omarchy/plugins/camkerr81.image-picker"
+PLUGINS_DIR="${HOME}/.config/omarchy/plugins/paletty.image-picker"
 HYPR_BINDINGS="${HOME}/.config/hypr/bindings.lua"
 MENU_EXT="${HOME}/.config/omarchy/extensions/omarchy-menu.jsonc"
 
@@ -27,7 +27,7 @@ echo "  ⠕⣀ Installed theme hooks to ${HOOKS_DIR}"
 
 # 3. Install Quickshell ImagePicker plugin
 mkdir -p "${PLUGINS_DIR}"
-cp -p "${SCRIPT_DIR}/plugins/camkerr81.image-picker/"* "${PLUGINS_DIR}/"
+cp -p "${SCRIPT_DIR}/plugins/paletty.image-picker/"* "${PLUGINS_DIR}/"
 echo "  ⠕⣀ Installed ImagePicker plugin to ${PLUGINS_DIR}"
 
 # 4. Add keybinding to Hyprland if missing

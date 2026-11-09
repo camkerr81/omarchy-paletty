@@ -21,8 +21,13 @@ import urllib.request
 
 USER_THEMES_DIR = os.path.expanduser("~/.config/omarchy/themes")
 DEFAULT_THEME_SLUG = "paletty-roll"
-CATALOG_PATH = "/home/camkerr81/Work/omarchy-launcher/app/src/main/assets/paletty_catalog.json"
-WALLPAPER_API_HOSTS = ["http://192.168.8.194:8001", "http://localhost:8001"]
+CATALOG_PATH = os.path.expanduser("~/Work/omarchy-launcher/app/src/main/assets/paletty_catalog.json")
+WALLPAPER_API_HOSTS = [
+    os.environ.get("WALLPAPER_API_URL", "").strip(),
+    "http://192.168.8.194:8001",
+    "http://localhost:8001"
+]
+WALLPAPER_API_HOSTS = [h.rstrip("/") for h in WALLPAPER_API_HOSTS if h]
 
 # Predefined Wallhaven 6-digit hex palette colors for direct fallback
 WALLHAVEN_PRESET_COLORS = [

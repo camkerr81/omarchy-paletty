@@ -4,5 +4,5 @@ THEME_NAME="$1"
 
 if [[ "$THEME_NAME" == "paletty-roll" ]]; then
   # Prepare next roll in background so the theme chooser is immediately primed for next time
-  nohup /home/camkerr81/.local/bin/omarchy-paletty-roll --prepare-next >/dev/null 2>&1 &
+  nohup "${HOME}/.local/bin/omarchy-paletty-roll" --prepare-next >/dev/null 2>&1 &
 fi

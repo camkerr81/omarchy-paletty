@@ -4,7 +4,7 @@ set -euo pipefail
 
 BIN_DIR="${HOME}/.local/bin"
 HOOKS_DIR="${HOME}/.config/omarchy/hooks/theme-set.d"
-PLUGINS_DIR="${HOME}/.config/omarchy/plugins/camkerr81.image-picker"
+PLUGINS_DIR="${HOME}/.config/omarchy/plugins/paletty.image-picker"
 
 echo "⢞⡷ Removing omarchy-paletty..."
 

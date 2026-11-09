@@ -1,10 +1,10 @@
 {
   "schemaVersion": 1,
-  "id": "camkerr81.image-picker",
-  "name": "My Image picker",
+  "id": "paletty.image-picker",
+  "name": "Paletty Image Picker",
   "version": "1.0.0",
   "author": "Omarchy",
-  "description": "Image-grid selector overlay used for wallpapers, themes, and any other directory of images",
+  "description": "Image-grid selector overlay with Paletty roll (Ctrl+R) and wallpaper cycling (Ctrl+W)",
   "kinds": [
     "overlay"
   ],
