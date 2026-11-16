@@ -25,6 +25,7 @@ CATALOG_PATH = os.path.expanduser("~/Work/omarchy-launcher/app/src/main/assets/p
 WALLPAPER_API_HOSTS = [
     os.environ.get("WALLPAPER_API_URL", "").strip(),
     "http://192.168.8.194:8001",
+    "http://192.168.8.190:8001",
     "http://localhost:8001"
 ]
 WALLPAPER_API_HOSTS = [h.rstrip("/") for h in WALLPAPER_API_HOSTS if h]
